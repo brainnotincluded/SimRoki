@@ -922,6 +922,8 @@ impl Simulation {
         });
         let center_of_mass = self.robot_center_of_mass();
         let joint_names = ["right_hip", "right_knee", "left_hip", "left_knee"];
+        let ball_contact = self.ball_contact_with_robot();
+        let ball_state = state.ball.as_ref();
         let mut values = vec![
             self.rl_target_direction,
             base.y,
@@ -933,8 +935,13 @@ impl Simulation {
             center_of_mass.map(|com| com[1] - base.y).unwrap_or(0.0),
             if state.contacts.left_foot { 1.0 } else { 0.0 },
             if state.contacts.right_foot { 1.0 } else { 0.0 },
-            state.ball.as_ref().map(|ball| ball.x - base.x).unwrap_or(0.0),
-            state.ball.as_ref().map(|ball| ball.y - base.y).unwrap_or(0.0),
+            ball_state.map(|b| b.x - base.x).unwrap_or(0.0),
+            ball_state.map(|b| b.y - base.y).unwrap_or(0.0),
+            base.x,                                                   // robot absolute x
+            ball_state.map(|b| b.x).unwrap_or(0.0),                  // ball absolute x
+            ball_state.map(|b| b.vx).unwrap_or(0.0),                 // ball velocity x
+            ball_state.map(|b| b.vy).unwrap_or(0.0),                 // ball velocity y
+            if ball_contact { 1.0 } else { 0.0 },                    // ball touching robot
         ];
         let mut names = vec![
             "target_direction".to_owned(),
@@ -949,6 +956,11 @@ impl Simulation {
             "right_contact".to_owned(),
             "ball_dx".to_owned(),
             "ball_dy".to_owned(),
+            "robot_x".to_owned(),
+            "ball_x".to_owned(),
+            "ball_vx".to_owned(),
+            "ball_vy".to_owned(),
+            "ball_contact".to_owned(),
         ];
         for name in joint_names {
             let joint = state.joints.get(name).cloned().unwrap_or(JointState {
@@ -1504,6 +1516,20 @@ impl Simulation {
             .values()
             .map(|joint| joint.torque.abs() / self.servo_max_torque.max(0.0001))
             .sum::<f32>();
+        // Ball position relative to robot
+        let robot_x = self.robot_base_x();
+        let ball_x = self.ball_x();
+        let ball_lead = (ball_x - robot_x) * self.rl_target_direction;
+        let ball_behind_penalty = if ball_lead < 0.0 { ball_lead.abs() * 1.0 } else { 0.0 };
+
+        // Sustained velocity reward: reward per-step speed, not cumulative distance
+        // This makes walking 10s at 5m/s = 50 reward, same as sprinting 1s at 50m/s = 50 reward
+        // But the alive bonus makes the 10s walk earn 50+alive vs sprint earn 50+nothing
+        let velocity = observation.values.get(3).copied().unwrap_or(0.0); // torso_vx
+        let speed_in_direction = velocity * self.rl_target_direction;
+        // Clamp speed reward to prevent infinite reward from flying/falling fast
+        let velocity_reward = speed_in_direction.clamp(0.0, 5.0) * 0.8;
+
         let breakdown = RlRewardBreakdown {
             forward_progress: forward_progress * self.config.rl.reward_forward_weight,
             ball_progress: ball_progress * self.config.rl.reward_ball_forward_weight,
@@ -1521,7 +1547,9 @@ impl Simulation {
             + breakdown.height_bonus
             + breakdown.contact_bonus
             - breakdown.torque_penalty
-            - breakdown.action_delta_penalty;
+            - breakdown.action_delta_penalty
+            - ball_behind_penalty
+            + velocity_reward;
         let (done, truncated) = self.rl_done();
         RlStepResult {
             observation,
@@ -1575,6 +1603,31 @@ impl Simulation {
         self.narrow_phase
             .contact_pairs_with(collider)
             .any(|pair| pair.has_any_active_contact)
+    }
+
+    fn ball_contact_with_robot(&self) -> bool {
+        let Some(ball_handle) = self.ball else {
+            return false;
+        };
+        let Some(robot) = &self.robot else {
+            return false;
+        };
+        // Find ball collider
+        let ball_collider = self.colliders.iter().find_map(|(ch, c)| {
+            if c.parent()? == ball_handle { Some(ch) } else { None }
+        });
+        let Some(ball_ch) = ball_collider else {
+            return false;
+        };
+        // Check if ball has active contacts with any robot shin
+        for shin_ch in [robot.left_shin_collider, robot.right_shin_collider] {
+            if let Some(pair) = self.narrow_phase.contact_pair(ball_ch, shin_ch) {
+                if pair.has_any_active_contact {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     fn current_targets(&self) -> ServoTargets {

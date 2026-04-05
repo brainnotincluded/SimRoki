@@ -76,15 +76,15 @@ left_knee = -1.1706396341323853
 
 [rl]
 control_substeps = 4
-episode_timeout_s = 20.0
+episode_timeout_s = 120.0
 torso_min_height = 0.3
 torso_max_tilt_rad = 1.25
 action_limit_deg = 180.0
-reward_forward_weight = 2.0
-reward_alive_bonus = 0.02
-reward_upright_weight = 0.15
-reward_height_weight = 0.1
-reward_contact_weight = 0.03
-reward_ball_forward_weight = 3.0
-penalty_torque_weight = 0.0025
-penalty_action_delta_weight = 0.0015
+reward_forward_weight = 5.0
+reward_alive_bonus = 0.1
+reward_upright_weight = 0.1
+reward_height_weight = 0.05
+reward_contact_weight = 0.02
+reward_ball_forward_weight = 5.0
+penalty_torque_weight = 0.002
+penalty_action_delta_weight = 0.001

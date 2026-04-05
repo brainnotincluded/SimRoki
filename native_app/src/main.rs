@@ -92,6 +92,7 @@ struct ControlPanelState {
     motion_loop: bool,
     motion_repeat_delay_ms: f32,
     robofest_active: bool,
+    robofest_waiting_for_api: bool,
     robofest_start_time: f32,
     robofest_elapsed_time: f32,
     robofest_finish_x: Option<f32>,
@@ -104,6 +105,7 @@ struct ControlPanelState {
 #[derive(Debug)]
 struct ExternalControlState {
     last_external_command: Option<Instant>,
+    robofest_first_api_time: Option<Instant>,
 }
 
 #[derive(Debug)]
@@ -128,12 +130,17 @@ impl IntoResponse for AppError {
 }
 
 fn window_conf() -> Conf {
+    let headless = std::env::var("SIMROKI_HEADLESS").is_ok();
     Conf {
-        window_title: "Five Link Robot Simulator".to_owned(),
-        window_width: WINDOW_WIDTH,
-        window_height: WINDOW_HEIGHT,
-        high_dpi: true,
-        sample_count: 4,
+        window_title: if headless {
+            "SimRoki (headless)".to_owned()
+        } else {
+            "Five Link Robot Simulator".to_owned()
+        },
+        window_width: if headless { 64 } else { WINDOW_WIDTH },
+        window_height: if headless { 64 } else { WINDOW_HEIGHT },
+        high_dpi: !headless,
+        sample_count: if headless { 0 } else { 4 },
         ..Default::default()
     }
 }
@@ -161,13 +168,16 @@ async fn main() {
     let mut controls = ControlPanelState::default();
     spawn_api_server(sim.clone(), external_control.clone());
 
+    let headless = std::env::var("SIMROKI_HEADLESS").is_ok();
     loop {
-        clear_background(color_u8!(244, 241, 234, 255));
-        handle_keyboard(&sim);
-        update_view(&mut view, &sim);
-        update_robofest_state(&sim, &mut controls);
-        draw_world(&sim, &view, &controls, &fonts);
-        draw_control_panel(&sim, &external_control, &mut controls);
+        if !headless {
+            clear_background(color_u8!(244, 241, 234, 255));
+            handle_keyboard(&sim);
+            update_view(&mut view, &sim);
+            update_robofest_state(&sim, &external_control, &mut controls);
+            draw_world(&sim, &view, &controls, &fonts);
+            draw_control_panel(&sim, &external_control, &mut controls);
+        }
         if let Ok(mut sim) = sim.lock() {
             sim.step_for_seconds(get_frame_time());
         }
@@ -227,8 +237,10 @@ async fn run_server(sim: SharedSimulation, external_control: SharedExternalContr
         .route("/walk/direction", post(set_walk_direction))
         .with_state(AppState { sim, external_control });
 
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
-    info!("native viewer active; control API at http://127.0.0.1:8080");
+    let port = std::env::var("SIMROKI_PORT").unwrap_or_else(|_| "8080".to_string());
+    let addr = format!("127.0.0.1:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await?;
+    info!("native viewer active; control API at http://{addr}");
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -614,27 +626,25 @@ fn draw_control_panel(
             }
         }
         if ui.button(None, "Start ROBOFEST 2026") {
-            if apply_motion_json_to_frames(controls).is_ok() && !controls.motion_frames.is_empty() {
-                if let Ok(mut sim) = sim.lock() {
-                    sim.reset_robot();
-                    sim.resume();
-                    sim.clear_gait();
-                    sim.set_motion_sequence_deg(MotionSequenceCommand {
-                        frames: controls.motion_frames.clone(),
-                        loop_enabled: false,
-                        repeat_delay_ms: 0.0,
-                    });
-                    let fresh_state = sim.state();
-                    let start_x = fresh_state.base.as_ref().map(|base| base.x).unwrap_or(0.0);
-                    controls.robofest_active = true;
-                    controls.robofest_start_time = fresh_state.time;
-                    controls.robofest_elapsed_time = 0.0;
-                    controls.robofest_finish_x = Some(start_x + 100.0);
-                    controls.robofest_robot_reached = false;
-                    controls.robofest_ball_reached = false;
-                    controls.robofest_result_message = None;
-                    controls.sync_from_state(&fresh_state);
-                }
+            if let Ok(mut sim) = sim.lock() {
+                sim.reset_robot();
+                sim.resume();
+                sim.clear_gait();
+                let fresh_state = sim.state();
+                let start_x = fresh_state.base.as_ref().map(|base| base.x).unwrap_or(0.0);
+                controls.robofest_active = true;
+                controls.robofest_waiting_for_api = true;
+                controls.robofest_start_time = 0.0;
+                controls.robofest_elapsed_time = 0.0;
+                controls.robofest_finish_x = Some(start_x + 100.0);
+                controls.robofest_robot_reached = false;
+                controls.robofest_ball_reached = false;
+                controls.robofest_result_message = None;
+                controls.sync_from_state(&fresh_state);
+            }
+            // Reset first API time so robofest timer starts fresh on next API call
+            if let Ok(mut ext) = external_control.lock() {
+                ext.robofest_first_api_time = None;
             }
         }
         if ui.button(None, "Save JSON") {
@@ -843,7 +853,7 @@ fn apply_controls(sim: &SharedSimulation, controls: &ControlPanelState) {
     }
 }
 
-fn update_robofest_state(sim: &SharedSimulation, controls: &mut ControlPanelState) {
+fn update_robofest_state(sim: &SharedSimulation, external_control: &SharedExternalControl, controls: &mut ControlPanelState) {
     let state = {
         let Ok(sim) = sim.lock() else {
             return;
@@ -855,19 +865,34 @@ fn update_robofest_state(sim: &SharedSimulation, controls: &mut ControlPanelStat
         return;
     };
 
-    controls.robofest_elapsed_time = (state.time - controls.robofest_start_time).max(0.0);
+    // Start timer on first API command after button press
+    if controls.robofest_waiting_for_api {
+        if let Ok(ext) = external_control.lock() {
+            if let Some(first_api_time) = ext.robofest_first_api_time {
+                controls.robofest_waiting_for_api = false;
+                controls.robofest_start_time = state.time;
+            }
+        }
+    }
+
+    if controls.robofest_waiting_for_api {
+        controls.robofest_elapsed_time = 0.0;
+    } else if controls.robofest_start_time > 0.0 {
+        controls.robofest_elapsed_time = (state.time - controls.robofest_start_time).max(0.0);
+    }
+
     controls.robofest_robot_reached = state.base.as_ref().map(|base| base.x >= finish_x).unwrap_or(false);
     controls.robofest_ball_reached = state.ball.as_ref().map(|ball| ball.x >= finish_x).unwrap_or(false);
 
     if controls.robofest_active && controls.robofest_robot_reached {
         controls.robofest_active = false;
         let ball_status = if controls.robofest_ball_reached {
-            "мяч: да (+10 баллов)"
+            "ball: YES (+10 points)"
         } else {
-            "мяч: нет (+0 баллов)"
+            "ball: NO (+0 points)"
         };
         controls.robofest_result_message = Some(format!(
-            "Поздравляем! Время: {:.2} с | {ball_status}",
+            "Finished! Time: {:.2}s | {ball_status}",
             controls.robofest_elapsed_time
         ));
     }
@@ -1235,7 +1260,7 @@ fn draw_overlay(
             fonts.cyrillic.as_ref(),
         );
         draw_text_with_optional_font(
-            "Нажмите Start для новой попытки",
+            "Press Start for a new attempt",
             x + 20.0,
             y + 112.0,
             22,
@@ -1302,6 +1327,7 @@ impl Default for ControlPanelState {
             motion_loop: false,
             motion_repeat_delay_ms: 0.0,
             robofest_active: false,
+            robofest_waiting_for_api: false,
             robofest_start_time: 0.0,
             robofest_elapsed_time: 0.0,
             robofest_finish_x: None,
@@ -1347,6 +1373,7 @@ impl Default for ExternalControlState {
     fn default() -> Self {
         Self {
             last_external_command: None,
+            robofest_first_api_time: None,
         }
     }
 }
@@ -1354,6 +1381,10 @@ impl Default for ExternalControlState {
 fn mark_external_control(external_control: &SharedExternalControl) {
     if let Ok(mut state) = external_control.lock() {
         state.last_external_command = Some(Instant::now());
+        // Record first API call time for robofest timer
+        if state.robofest_first_api_time.is_none() {
+            state.robofest_first_api_time = Some(Instant::now());
+        }
     }
 }
 
