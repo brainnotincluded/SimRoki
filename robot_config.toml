@@ -31,29 +31,29 @@ angular_damping = 0.8500000238418579
 linear_damping = 0.07999999821186066
 
 [robot.initial_pose.torso]
-x = 261.1326599121094
-y = 0.723759114742279
-angle = -0.044158484786748886
+x = 0.0
+y = 1.1200000047683716
+angle = 0.0
 
 [robot.initial_pose.left_thigh]
-x = 261.3445739746094
-y = 0.4291573464870453
-angle = 1.7670902013778687
+x = 0.08661922812461853
+y = 0.5669340491294861
+angle = 0.3861275017261505
 
 [robot.initial_pose.left_shin]
-x = 261.6695251464844
-y = 0.24456742405891418
-angle = 0.4085896909236908
+x = -0.003380774287506938
+y = 0.17693403363227844
+angle = -0.7845121622085571
 
 [robot.initial_pose.right_thigh]
-x = 260.89324951171875
-y = 0.43485140800476074
-angle = -1.7946749925613403
+x = -0.08661922812461853
+y = 0.5669340491294861
+angle = -0.3861275017261505
 
 [robot.initial_pose.right_shin]
-x = 260.5891418457031
-y = 0.24885740876197815
-angle = -0.3253740668296814
+x = 0.003380774287506938
+y = 0.17693403363227844
+angle = 0.7845121622085571
 
 [servo]
 kp = 20.0
@@ -63,13 +63,28 @@ max_torque = 18.148937225341797
 integral_limit = 10.0
 
 [servo.zero_offsets]
-right_hip = -1.8392802476882935
-right_knee = 1.3800795078277588
-left_hip = 1.8557238578796387
-left_knee = -1.2691965103149414
+right_hip = -0.3861275017261505
+right_knee = 1.1706396341323853
+left_hip = 0.3861275017261505
+left_knee = -1.1706396341323853
 
 [servo.initial_targets]
-right_hip = -1.7501569986343384
-right_knee = 1.4692027568817139
-left_hip = 1.8111622333526611
-left_knee = -1.3583195209503174
+right_hip = -0.3861275017261505
+right_knee = 1.1706396341323853
+left_hip = 0.3861275017261505
+left_knee = -1.1706396341323853
+
+[rl]
+control_substeps = 4
+episode_timeout_s = 20.0
+torso_min_height = 0.3
+torso_max_tilt_rad = 1.25
+action_limit_deg = 180.0
+reward_forward_weight = 2.0
+reward_alive_bonus = 0.02
+reward_upright_weight = 0.15
+reward_height_weight = 0.1
+reward_contact_weight = 0.03
+reward_ball_forward_weight = 3.0
+penalty_torque_weight = 0.0025
+penalty_action_delta_weight = 0.0015

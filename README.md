@@ -51,6 +51,7 @@ Configurable values include:
 - integral limit
 - servo zero positions
 - startup joint targets
+- RL rollout timing, termination thresholds, and reward weights
 
 Notes:
 
@@ -158,6 +159,9 @@ Current local desktop control API:
 - `POST /pose`
 - `POST /gait`
 - `POST /servo/targets`
+- `POST /rl/reset`
+- `GET /rl/observation`
+- `POST /rl/step`
 
 `/state` includes:
 
@@ -168,6 +172,38 @@ Current local desktop control API:
 - link masses
 - link lengths
 - servo zero offsets
+
+`/rl/step` uses:
+
+- `action_deg`: four relative servo targets in degrees around the configured zero pose
+- `repeat_steps`: how many fixed simulation steps to execute for one RL control action
+
+RL reward shaping and termination thresholds live in:
+
+- `[rl]` section of [robot_config.toml](C:/Users/root/Documents/New%20project/robot_config.toml)
+
+## RL Preparation
+
+The desktop simulator is now prepared for visual RL integration before moving to headless mode.
+
+What is ready:
+
+- RL reset/step/observation API
+- observation vector with stable feature names
+- reward breakdown from the simulator side
+- done/truncated flags from the simulator side
+- action semantics fixed to 4 joints in degrees around servo zero
+- Python bridge prepared in [RL/KNP/desktop_rl_env.py](C:/Users/root/Documents/New%20project/RL/KNP/desktop_rl_env.py)
+- KNP scaffold in [RL/KNP/knp_walk_scaffold.py](C:/Users/root/Documents/New%20project/RL/KNP/knp_walk_scaffold.py)
+- PyTorch debug rollout in [RL/KNP/torch_walk_debug.py](C:/Users/root/Documents/New%20project/RL/KNP/torch_walk_debug.py)
+- integration notes in [RL/KNP/README_INTEGRATION.md](C:/Users/root/Documents/New%20project/RL/KNP/README_INTEGRATION.md)
+
+Current transport recommendation:
+
+- visual debug phase: local HTTP + JSON
+- high-throughput training phase: in-process binding over `sim_core` or shared memory
+
+For this project, binary TCP is not the preferred next step on the same machine.
 
 ## Python control
 

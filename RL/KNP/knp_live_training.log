@@ -1,0 +1,45 @@
+KNP walking+kicking training started
+obs_size=27 action_size=4 hidden_size=64
+episode=0001 reward=+22.400 robot_dx=-0.270 ball_dx_world=-0.562 ball_gap=0.946 steps=83
+episode=0005 reward=+58.516 robot_dx=+1.941 ball_dx_world=+3.735 ball_gap=3.031 steps=180
+episode=0010 reward=+59.046 robot_dx=+2.212 ball_dx_world=+3.012 ball_gap=2.037 steps=180
+episode=0015 reward=+34.201 robot_dx=+0.423 ball_dx_world=+4.258 ball_gap=5.072 steps=103
+episode=0020 reward=+14.265 robot_dx=-0.258 ball_dx_world=-0.000 ball_gap=1.495 steps=53
+episode=0025 reward=+61.844 robot_dx=+2.289 ball_dx_world=+4.537 ball_gap=3.485 steps=180
+episode=0030 reward=+20.796 robot_dx=-0.001 ball_dx_world=-0.099 ball_gap=1.139 steps=74
+episode=0035 reward=+12.267 robot_dx=-0.281 ball_dx_world=-0.000 ball_gap=1.518 steps=47
+episode=0040 reward=+5.762 robot_dx=-0.417 ball_dx_world=-0.000 ball_gap=1.654 steps=23
+episode=0045 reward=+11.858 robot_dx=-0.241 ball_dx_world=-0.000 ball_gap=1.478 steps=48
+episode=0050 reward=+21.188 robot_dx=-0.393 ball_dx_world=-0.409 ball_gap=1.220 steps=77
+episode=0055 reward=+5.294 robot_dx=-0.510 ball_dx_world=+0.000 ball_gap=1.746 steps=22
+episode=0060 reward=+49.032 robot_dx=+0.757 ball_dx_world=+3.499 ball_gap=3.979 steps=150
+episode=0065 reward=+6.450 robot_dx=-0.382 ball_dx_world=-0.000 ball_gap=1.619 steps=26
+episode=0070 reward=+6.226 robot_dx=-0.332 ball_dx_world=+0.000 ball_gap=1.569 steps=25
+episode=0075 reward=+11.882 robot_dx=-0.521 ball_dx_world=-0.000 ball_gap=1.758 steps=47
+episode=0080 reward=+13.269 robot_dx=-0.313 ball_dx_world=+0.000 ball_gap=1.550 steps=49
+episode=0085 reward=+11.658 robot_dx=-0.569 ball_dx_world=-0.000 ball_gap=1.806 steps=44
+episode=0090 reward=+13.455 robot_dx=-0.212 ball_dx_world=+0.000 ball_gap=1.449 steps=49
+episode=0095 reward=+60.129 robot_dx=+1.521 ball_dx_world=+3.760 ball_gap=3.476 steps=180
+episode=0100 reward=+12.390 robot_dx=-0.246 ball_dx_world=+0.000 ball_gap=1.483 steps=45
+episode=0105 reward=+57.504 robot_dx=+2.354 ball_dx_world=+2.144 ball_gap=1.027 steps=180
+episode=0110 reward=+59.161 robot_dx=+1.686 ball_dx_world=+3.259 ball_gap=2.809 steps=180
+episode=0115 reward=+69.356 robot_dx=+2.207 ball_dx_world=+9.562 ball_gap=8.592 steps=180
+episode=0120 reward=+60.568 robot_dx=+1.875 ball_dx_world=+4.801 ball_gap=4.163 steps=180
+episode=0125 reward=+52.741 robot_dx=+1.304 ball_dx_world=+2.116 ball_gap=2.049 steps=180
+episode=0130 reward=+65.396 robot_dx=+2.180 ball_dx_world=+8.007 ball_gap=7.064 steps=180
+episode=0135 reward=+22.884 robot_dx=+0.105 ball_dx_world=+0.090 ball_gap=1.221 steps=84
+episode=0140 reward=+29.840 robot_dx=-1.409 ball_dx_world=-0.181 ball_gap=2.464 steps=120
+episode=0145 reward=+55.481 robot_dx=+0.978 ball_dx_world=+4.229 ball_gap=4.488 steps=180
+episode=0150 reward=+24.878 robot_dx=-0.981 ball_dx_world=-0.120 ball_gap=2.098 steps=98
+episode=0155 reward=+59.587 robot_dx=+1.686 ball_dx_world=+6.302 ball_gap=5.853 steps=180
+episode=0160 reward=+59.213 robot_dx=+1.664 ball_dx_world=+6.403 ball_gap=5.976 steps=180
+episode=0165 reward=+17.821 robot_dx=-1.003 ball_dx_world=-0.558 ball_gap=1.681 steps=70
+episode=0170 reward=+52.454 robot_dx=+1.238 ball_dx_world=+1.983 ball_gap=1.982 steps=180
+episode=0175 reward=+12.782 robot_dx=-1.040 ball_dx_world=-0.038 ball_gap=2.239 steps=53
+episode=0180 reward=+20.243 robot_dx=+0.084 ball_dx_world=+0.000 ball_gap=1.153 steps=75
+episode=0185 reward=+34.239 robot_dx=+0.295 ball_dx_world=+2.110 ball_gap=3.052 steps=110
+episode=0190 reward=+34.761 robot_dx=+1.147 ball_dx_world=+2.583 ball_gap=2.673 steps=108
+episode=0195 reward=+58.458 robot_dx=+0.948 ball_dx_world=+4.771 ball_gap=5.060 steps=180
+episode=0200 reward=+24.954 robot_dx=-1.705 ball_dx_world=-0.927 ball_gap=2.015 steps=100
+saved history to C:\Users\root\Documents\New project\RL\KNP\knp_walk_kick_training.json
+saved best policy to RL/KNP/knp_walk_kick_best.npz

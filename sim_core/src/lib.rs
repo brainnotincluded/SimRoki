@@ -6,8 +6,8 @@ use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, path::Path};
 
 pub use config::{
-    BodyDynamicsConfig, BodyPoseConfig, InitialPoseConfig, JointAnglesConfig, LinkConfig, PhysicsConfig, RobotConfig,
-    ServoConfig, SimulationConfig,
+    BodyDynamicsConfig, BodyPoseConfig, InitialPoseConfig, JointAnglesConfig, LinkConfig, PhysicsConfig, RlConfig,
+    RobotConfig, ServoConfig, SimulationConfig,
 };
 
 const TORSO_UPRIGHT_KP: f32 = 0.0;
@@ -116,6 +116,65 @@ pub struct SimulationState {
     pub link_lengths: BTreeMap<String, f32>,
     pub servo_zeros: BTreeMap<String, f32>,
     pub contacts: ContactState,
+    pub walk_direction: f32,
+    pub walk_enabled: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RlObservation {
+    pub values: Vec<f32>,
+    pub names: Vec<String>,
+    pub action_order: Vec<String>,
+    pub torso_height: f32,
+    pub torso_angle: f32,
+    pub base_x: f32,
+    pub target_direction: f32,
+    pub center_of_mass: Option<[f32; 2]>,
+    pub contacts: ContactState,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RlRewardBreakdown {
+    pub forward_progress: f32,
+    pub ball_progress: f32,
+    pub alive_bonus: f32,
+    pub upright_bonus: f32,
+    pub height_bonus: f32,
+    pub contact_bonus: f32,
+    pub torque_penalty: f32,
+    pub action_delta_penalty: f32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RlStepResult {
+    pub observation: RlObservation,
+    pub reward: f32,
+    pub done: bool,
+    pub truncated: bool,
+    pub episode_time: f32,
+    pub breakdown: RlRewardBreakdown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RlStepCommand {
+    pub action_deg: [f32; 4],
+    #[serde(default)]
+    pub repeat_steps: Option<u32>,
+    #[serde(default)]
+    pub direction: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct RlResetCommand {
+    #[serde(default)]
+    pub direction: Option<f32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WalkDirectionCommand {
+    pub direction: f32,
+    #[serde(default)]
+    pub enabled: Option<bool>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -240,6 +299,9 @@ pub struct Simulation {
     robot: Option<RobotHandles>,
     scene: SceneKind,
     config: SimulationConfig,
+    canonical_initial_pose: InitialPoseConfig,
+    canonical_zero_offsets: JointAnglesConfig,
+    canonical_initial_targets: JointAnglesConfig,
     time: f32,
     paused: bool,
     accumulator: f32,
@@ -250,6 +312,13 @@ pub struct Simulation {
     servo_ki: f32,
     servo_kd: f32,
     servo_max_torque: f32,
+    rl_episode_time: f32,
+    rl_last_base_x: f32,
+    rl_last_ball_x: f32,
+    rl_last_action_deg: [f32; 4],
+    rl_target_direction: f32,
+    directional_walk_enabled: bool,
+    walk_phase: f32,
 }
 
 impl Default for Simulation {
@@ -298,6 +367,7 @@ impl Simulation {
         sim.spawn_ground();
         sim.spawn_robot();
         sim.spawn_robot_ball();
+        sim.sync_rl_trackers();
         sim
     }
 
@@ -322,6 +392,9 @@ impl Simulation {
             robot: None,
             scene,
             config: config.clone(),
+            canonical_initial_pose: config.robot.initial_pose.clone(),
+            canonical_zero_offsets: config.servo.zero_offsets,
+            canonical_initial_targets: config.servo.initial_targets,
             time: 0.0,
             paused: false,
             accumulator: 0.0,
@@ -332,6 +405,13 @@ impl Simulation {
             servo_ki: config.servo.ki,
             servo_kd: config.servo.kd,
             servo_max_torque: config.servo.max_torque,
+            rl_episode_time: 0.0,
+            rl_last_base_x: 0.0,
+            rl_last_ball_x: 0.0,
+            rl_last_action_deg: [0.0; 4],
+            rl_target_direction: 1.0,
+            directional_walk_enabled: false,
+            walk_phase: 0.0,
         }
     }
 
@@ -384,6 +464,11 @@ impl Simulation {
     }
 
     fn spawn_robot_ball(&mut self) {
+        let translation = self.robot_ball_translation();
+        self.spawn_ball(translation, ROBOT_BALL_RADIUS_M, ROBOT_BALL_MASS_KG);
+    }
+
+    fn robot_ball_translation(&self) -> Vector<Real> {
         let pose = &self.config.robot.initial_pose;
         let rightmost_x = pose
             .torso
@@ -392,13 +477,31 @@ impl Simulation {
             .max(pose.left_shin.x)
             .max(pose.right_thigh.x)
             .max(pose.right_shin.x);
-        let ball_x = rightmost_x + ROBOT_BALL_OFFSET_X_M;
+        let leftmost_x = pose
+            .torso
+            .x
+            .min(pose.left_thigh.x)
+            .min(pose.left_shin.x)
+            .min(pose.right_thigh.x)
+            .min(pose.right_shin.x);
+        let ball_x = if self.rl_target_direction >= 0.0 {
+            rightmost_x + ROBOT_BALL_OFFSET_X_M
+        } else {
+            leftmost_x - ROBOT_BALL_OFFSET_X_M
+        };
         let ball_y = ROBOT_BALL_RADIUS_M + ROBOT_BALL_CLEARANCE_Y_M;
-        self.spawn_ball(
-            vector![ball_x, ball_y],
-            ROBOT_BALL_RADIUS_M,
-            ROBOT_BALL_MASS_KG,
-        );
+        vector![ball_x, ball_y]
+    }
+
+    fn align_ball_with_target_direction(&mut self) {
+        let translation = self.robot_ball_translation();
+        if let Some(handle) = self.ball {
+            if let Some(ball) = self.bodies.get_mut(handle) {
+                ball.set_translation(translation, true);
+                ball.set_linvel(vector![0.0, 0.0], true);
+                ball.set_angvel(0.0, true);
+            }
+        }
     }
 
     fn spawn_robot(&mut self) {
@@ -590,9 +693,15 @@ impl Simulation {
     pub fn reset_robot(&mut self) {
         let targets = self.current_targets();
         let gains = self.servo_gains();
+        let direction = self.rl_target_direction;
+        let walk_enabled = self.directional_walk_enabled;
         *self = Self::new_robot_with_config_and_suspension(self.config.clone(), self.robot_suspended);
+        self.rl_target_direction = direction;
+        self.directional_walk_enabled = walk_enabled;
+        self.align_ball_with_target_direction();
         self.set_servo_gains(gains.0, gains.1, gains.2, gains.3);
         self.apply_targets(targets);
+        self.sync_rl_trackers();
     }
 
     pub fn pause(&mut self) {
@@ -608,18 +717,32 @@ impl Simulation {
     }
 
     pub fn set_scene(&mut self, scene: SceneKind) {
+        let direction = self.rl_target_direction;
+        let walk_enabled = self.directional_walk_enabled;
         *self = match scene {
             SceneKind::Ball => Self::new_ball_with_config(self.config.clone()),
             SceneKind::Robot => Self::new_robot_with_config_and_suspension(self.config.clone(), self.robot_suspended),
         };
+        self.rl_target_direction = direction;
+        self.directional_walk_enabled = walk_enabled && scene == SceneKind::Robot;
+        if scene == SceneKind::Robot {
+            self.align_ball_with_target_direction();
+        }
+        self.sync_rl_trackers();
     }
 
     pub fn set_robot_suspended(&mut self, suspended: bool) {
         let targets = self.current_targets();
         let gains = self.servo_gains();
+        let direction = self.rl_target_direction;
+        let walk_enabled = self.directional_walk_enabled;
         *self = Self::new_robot_with_config_and_suspension(self.config.clone(), suspended);
+        self.rl_target_direction = direction;
+        self.directional_walk_enabled = walk_enabled;
+        self.align_ball_with_target_direction();
         self.set_servo_gains(gains.0, gains.1, gains.2, gains.3);
         self.apply_targets(targets);
+        self.sync_rl_trackers();
     }
 
     pub fn robot_suspended(&self) -> bool {
@@ -639,8 +762,14 @@ impl Simulation {
             let paused = self.paused;
             let config = self.config.clone();
             let suspended = self.robot_suspended;
+            let direction = self.rl_target_direction;
+            let walk_enabled = self.directional_walk_enabled;
             *self = Self::new_robot_with_config_and_suspension(config, suspended);
+            self.rl_target_direction = direction;
+            self.directional_walk_enabled = walk_enabled;
+            self.align_ball_with_target_direction();
             self.paused = paused;
+            self.sync_rl_trackers();
         }
     }
 
@@ -665,6 +794,7 @@ impl Simulation {
 
     pub fn set_servo_zero_offsets(&mut self, zeros: JointAnglesConfig) {
         self.config.servo.zero_offsets = zeros;
+        self.canonical_zero_offsets = zeros;
     }
 
     pub fn set_servo_zero_to_current_pose(&mut self) {
@@ -759,6 +889,170 @@ impl Simulation {
         self.motion_sequence = None;
     }
 
+    pub fn rl_reset_with(&mut self, command: RlResetCommand) -> RlStepResult {
+        if self.scene != SceneKind::Robot {
+            self.set_scene(SceneKind::Robot);
+        }
+        if self.robot_suspended {
+            self.set_robot_suspended(false);
+        }
+        if let Some(direction) = command.direction {
+            self.set_target_direction(direction);
+        }
+        self.apply_directional_reset_profile();
+        self.reset_robot();
+        self.resume();
+        self.sync_rl_trackers();
+        self.rl_step_result(0.0, 0.0, 0.0)
+    }
+
+    pub fn rl_reset(&mut self) -> RlStepResult {
+        self.rl_reset_with(RlResetCommand::default())
+    }
+
+    pub fn rl_observation(&self) -> RlObservation {
+        let state = self.state();
+        let base = state.base.clone().unwrap_or(BodyState {
+            x: 0.0,
+            y: 0.0,
+            angle: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            omega: 0.0,
+        });
+        let center_of_mass = self.robot_center_of_mass();
+        let joint_names = ["right_hip", "right_knee", "left_hip", "left_knee"];
+        let mut values = vec![
+            self.rl_target_direction,
+            base.y,
+            base.angle,
+            base.vx,
+            base.vy,
+            base.omega,
+            center_of_mass.map(|com| com[0] - base.x).unwrap_or(0.0),
+            center_of_mass.map(|com| com[1] - base.y).unwrap_or(0.0),
+            if state.contacts.left_foot { 1.0 } else { 0.0 },
+            if state.contacts.right_foot { 1.0 } else { 0.0 },
+            state.ball.as_ref().map(|ball| ball.x - base.x).unwrap_or(0.0),
+            state.ball.as_ref().map(|ball| ball.y - base.y).unwrap_or(0.0),
+        ];
+        let mut names = vec![
+            "target_direction".to_owned(),
+            "torso_height".to_owned(),
+            "torso_angle".to_owned(),
+            "torso_vx".to_owned(),
+            "torso_vy".to_owned(),
+            "torso_omega".to_owned(),
+            "com_dx".to_owned(),
+            "com_dy".to_owned(),
+            "left_contact".to_owned(),
+            "right_contact".to_owned(),
+            "ball_dx".to_owned(),
+            "ball_dy".to_owned(),
+        ];
+        for name in joint_names {
+            let joint = state.joints.get(name).cloned().unwrap_or(JointState {
+                angle: 0.0,
+                velocity: 0.0,
+                target: 0.0,
+                torque: 0.0,
+            });
+            let zero = state.servo_zeros.get(name).copied().unwrap_or(0.0);
+            values.push(normalize_angle(joint.angle - zero));
+            names.push(format!("{name}_angle_rel_zero"));
+            values.push(joint.velocity);
+            names.push(format!("{name}_velocity"));
+            values.push(normalize_angle(joint.target - zero));
+            names.push(format!("{name}_target_rel_zero"));
+            values.push(joint.torque / self.servo_max_torque.max(0.0001));
+            names.push(format!("{name}_torque_norm"));
+        }
+
+        RlObservation {
+            values,
+            names,
+            action_order: JointName::ALL
+                .iter()
+                .map(|joint| joint.as_str().to_owned())
+                .collect(),
+            torso_height: base.y,
+            torso_angle: base.angle,
+            base_x: base.x,
+            target_direction: self.rl_target_direction,
+            center_of_mass,
+            contacts: state.contacts,
+        }
+    }
+
+    pub fn rl_step_deg(&mut self, command: RlStepCommand) -> RlStepResult {
+        if let Some(direction) = command.direction {
+            self.set_target_direction(direction);
+        }
+        self.clear_gait();
+        let limit_deg = self.config.rl.action_limit_deg.abs().max(1.0);
+        let bounded = command.action_deg.map(|value| value.clamp(-limit_deg, limit_deg));
+        let zeros = self.config.servo.zero_offsets;
+        let previous_action = self.rl_last_action_deg;
+        let base_x_before = self.robot_base_x();
+        let ball_x_before = self.ball_x();
+        self.apply_targets(ServoTargets {
+            right_hip: Some(zeros.right_hip + bounded[0].to_radians()),
+            right_knee: Some(zeros.right_knee + bounded[1].to_radians()),
+            left_hip: Some(zeros.left_hip + bounded[2].to_radians()),
+            left_knee: Some(zeros.left_knee + bounded[3].to_radians()),
+        });
+
+        let repeat_steps = command
+            .repeat_steps
+            .unwrap_or(self.config.rl.control_substeps)
+            .max(1);
+        let mut executed_steps = 0u32;
+        for _ in 0..repeat_steps {
+            self.step_fixed();
+            executed_steps += 1;
+            let (done, truncated) = self.rl_done();
+            if done || truncated {
+                break;
+            }
+        }
+        self.rl_episode_time += self.dt() * executed_steps as f32;
+        let base_x_after = self.robot_base_x();
+        let ball_x_after = self.ball_x();
+        let forward_progress = base_x_after - base_x_before;
+        let ball_progress = (ball_x_after - ball_x_before).max(0.0);
+        let action_delta_penalty = bounded
+            .iter()
+            .zip(previous_action.iter())
+            .map(|(current, previous)| (current - previous).abs() / limit_deg)
+            .sum::<f32>();
+        self.rl_last_action_deg = bounded;
+        self.rl_last_base_x = base_x_after;
+        self.rl_last_ball_x = ball_x_after;
+        self.rl_step_result(forward_progress, ball_progress, action_delta_penalty)
+    }
+
+    pub fn set_target_direction(&mut self, direction: f32) {
+        self.rl_target_direction = if direction < 0.0 { -1.0 } else { 1.0 };
+        if self.scene == SceneKind::Robot {
+            self.align_ball_with_target_direction();
+        }
+    }
+
+    pub fn target_direction(&self) -> f32 {
+        self.rl_target_direction
+    }
+
+    pub fn set_directional_walk_enabled(&mut self, enabled: bool) {
+        self.directional_walk_enabled = enabled;
+        if !enabled {
+            self.walk_phase = 0.0;
+        }
+    }
+
+    pub fn directional_walk_enabled(&self) -> bool {
+        self.directional_walk_enabled
+    }
+
     pub fn step_for_seconds(&mut self, frame_dt: f32) {
         self.accumulator += frame_dt.max(0.0);
         while self.accumulator >= self.dt() {
@@ -773,6 +1067,7 @@ impl Simulation {
         }
 
         if self.scene == SceneKind::Robot {
+            self.apply_directional_walk_targets();
             self.apply_motion_sequence_targets();
             self.apply_gait_targets();
             self.apply_servo_forces();
@@ -1005,6 +1300,8 @@ impl Simulation {
                 left_foot: self.foot_contact(true),
                 right_foot: self.foot_contact(false),
             },
+            walk_direction: self.rl_target_direction,
+            walk_enabled: self.directional_walk_enabled,
         }
     }
 
@@ -1078,6 +1375,161 @@ impl Simulation {
             None
         } else {
             Some([weighted.x / mass_sum, weighted.y / mass_sum])
+        }
+    }
+
+    fn apply_directional_walk_targets(&mut self) {
+        if !self.directional_walk_enabled || self.motion_sequence.is_some() || self.gait.is_some() {
+            return;
+        }
+
+        let dt = self.dt();
+        let direction = self.rl_target_direction;
+        let state = self.state();
+        let torso_angle = state.base.as_ref().map(|base| base.angle).unwrap_or(0.0);
+        let torso_omega = state.base.as_ref().map(|base| base.omega).unwrap_or(0.0);
+        let forward_velocity = state.base.as_ref().map(|base| base.vx * direction).unwrap_or(0.0);
+        let phase = self.walk_phase;
+        let phase_sin = phase.sin();
+        let anti_phase_sin = -phase_sin;
+
+        let stance_knee = 0.45;
+        let swing_knee = 1.10;
+        let hip_bias = 0.08 * direction;
+        let hip_amp = 0.42 * direction;
+        let torso_feedback = (-0.28 * torso_angle - 0.09 * torso_omega).clamp(-0.22, 0.22);
+        let velocity_feedback = (0.10 * (0.55 - forward_velocity)).clamp(-0.15, 0.15);
+
+        let right_hip_rel = hip_bias + hip_amp * phase_sin + torso_feedback + velocity_feedback;
+        let left_hip_rel = -hip_bias + hip_amp * anti_phase_sin + torso_feedback + velocity_feedback;
+        let right_knee_rel = if phase_sin > 0.0 {
+            stance_knee + 0.18 * (1.0 - phase_sin)
+        } else {
+            swing_knee + 0.10 * (-phase_sin)
+        };
+        let left_knee_rel = if anti_phase_sin > 0.0 {
+            stance_knee + 0.18 * (1.0 - anti_phase_sin)
+        } else {
+            swing_knee + 0.10 * (-anti_phase_sin)
+        };
+
+        let zeros = self.config.servo.zero_offsets;
+        self.apply_targets(ServoTargets {
+            right_hip: Some(zeros.right_hip + right_hip_rel),
+            right_knee: Some(zeros.right_knee + right_knee_rel),
+            left_hip: Some(zeros.left_hip + left_hip_rel),
+            left_knee: Some(zeros.left_knee + left_knee_rel),
+        });
+        self.walk_phase = (self.walk_phase + dt * 4.2).rem_euclid(std::f32::consts::TAU);
+    }
+
+    fn apply_directional_reset_profile(&mut self) {
+        if self.rl_target_direction >= 0.0 {
+            self.config.robot.initial_pose = self.canonical_initial_pose.clone();
+            self.config.servo.zero_offsets = self.canonical_zero_offsets;
+            self.config.servo.initial_targets = self.canonical_initial_targets;
+        } else {
+            self.config.robot.initial_pose = mirror_initial_pose(&self.canonical_initial_pose);
+            self.config.servo.zero_offsets = mirror_joint_angles(self.canonical_zero_offsets);
+            self.config.servo.initial_targets = mirror_joint_angles(self.canonical_initial_targets);
+        }
+    }
+
+    fn sync_rl_trackers(&mut self) {
+        self.rl_episode_time = 0.0;
+        self.rl_last_base_x = self.robot_base_x();
+        self.rl_last_ball_x = self.ball_x();
+        self.rl_last_action_deg = self.current_relative_targets_deg();
+    }
+
+    fn robot_base_x(&self) -> f32 {
+        self.robot
+            .as_ref()
+            .and_then(|robot| self.body_state(robot.torso))
+            .map(|body| body.x)
+            .unwrap_or(0.0)
+    }
+
+    fn ball_x(&self) -> f32 {
+        self.ball
+            .and_then(|handle| self.body_state(handle))
+            .map(|body| body.x)
+            .unwrap_or(0.0)
+    }
+
+    fn current_relative_targets_deg(&self) -> [f32; 4] {
+        let zeros = self.config.servo.zero_offsets;
+        let targets = self.current_targets();
+        [
+            targets
+                .right_hip
+                .map(|value| (value - zeros.right_hip).to_degrees())
+                .unwrap_or_default(),
+            targets
+                .right_knee
+                .map(|value| (value - zeros.right_knee).to_degrees())
+                .unwrap_or_default(),
+            targets
+                .left_hip
+                .map(|value| (value - zeros.left_hip).to_degrees())
+                .unwrap_or_default(),
+            targets
+                .left_knee
+                .map(|value| (value - zeros.left_knee).to_degrees())
+                .unwrap_or_default(),
+        ]
+    }
+
+    fn rl_done(&self) -> (bool, bool) {
+        let observation = self.rl_observation();
+        let done = observation.torso_height < self.config.rl.torso_min_height
+            || observation.torso_angle.abs() > self.config.rl.torso_max_tilt_rad;
+        let truncated = self.rl_episode_time >= self.config.rl.episode_timeout_s;
+        (done, truncated)
+    }
+
+    fn rl_step_result(&self, forward_progress: f32, ball_progress: f32, action_delta_penalty: f32) -> RlStepResult {
+        let observation = self.rl_observation();
+        let upright_bonus = observation.torso_angle.cos().max(-1.0);
+        let height_span = (self.config.robot.initial_pose.torso.y - self.config.rl.torso_min_height).max(0.1);
+        let height_bonus = ((observation.torso_height - self.config.rl.torso_min_height) / height_span).clamp(0.0, 1.0);
+        let contact_bonus = if observation.contacts.left_foot || observation.contacts.right_foot {
+            1.0
+        } else {
+            0.0
+        };
+        let torque_penalty = self
+            .state()
+            .joints
+            .values()
+            .map(|joint| joint.torque.abs() / self.servo_max_torque.max(0.0001))
+            .sum::<f32>();
+        let breakdown = RlRewardBreakdown {
+            forward_progress: forward_progress * self.config.rl.reward_forward_weight,
+            ball_progress: ball_progress * self.config.rl.reward_ball_forward_weight,
+            alive_bonus: self.config.rl.reward_alive_bonus,
+            upright_bonus: upright_bonus * self.config.rl.reward_upright_weight,
+            height_bonus: height_bonus * self.config.rl.reward_height_weight,
+            contact_bonus: contact_bonus * self.config.rl.reward_contact_weight,
+            torque_penalty: torque_penalty * self.config.rl.penalty_torque_weight,
+            action_delta_penalty: action_delta_penalty * self.config.rl.penalty_action_delta_weight,
+        };
+        let reward = breakdown.forward_progress
+            + breakdown.ball_progress
+            + breakdown.alive_bonus
+            + breakdown.upright_bonus
+            + breakdown.height_bonus
+            + breakdown.contact_bonus
+            - breakdown.torque_penalty
+            - breakdown.action_delta_penalty;
+        let (done, truncated) = self.rl_done();
+        RlStepResult {
+            observation,
+            reward,
+            done,
+            truncated,
+            episode_time: self.rl_episode_time,
+            breakdown,
         }
     }
 
@@ -1215,10 +1667,40 @@ impl Simulation {
                 .left_knee
                 .unwrap_or(self.config.servo.initial_targets.left_knee),
         };
+        self.canonical_initial_pose = self.config.robot.initial_pose.clone();
+        self.canonical_zero_offsets = self.config.servo.zero_offsets;
+        self.canonical_initial_targets = self.config.servo.initial_targets;
     }
 
     fn dt(&self) -> f32 {
         self.integration_parameters.dt
+    }
+}
+
+fn mirror_body_pose(pose: BodyPoseConfig) -> BodyPoseConfig {
+    BodyPoseConfig {
+        x: -pose.x,
+        y: pose.y,
+        angle: -pose.angle,
+    }
+}
+
+fn mirror_initial_pose(pose: &InitialPoseConfig) -> InitialPoseConfig {
+    InitialPoseConfig {
+        torso: mirror_body_pose(pose.torso),
+        left_thigh: mirror_body_pose(pose.right_thigh),
+        left_shin: mirror_body_pose(pose.right_shin),
+        right_thigh: mirror_body_pose(pose.left_thigh),
+        right_shin: mirror_body_pose(pose.left_shin),
+    }
+}
+
+fn mirror_joint_angles(angles: JointAnglesConfig) -> JointAnglesConfig {
+    JointAnglesConfig {
+        right_hip: -angles.left_hip,
+        right_knee: -angles.left_knee,
+        left_hip: -angles.right_hip,
+        left_knee: -angles.right_knee,
     }
 }
 

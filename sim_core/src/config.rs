@@ -6,6 +6,8 @@ pub struct SimulationConfig {
     pub physics: PhysicsConfig,
     pub robot: RobotConfig,
     pub servo: ServoConfig,
+    #[serde(default)]
+    pub rl: RlConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,6 +78,43 @@ pub struct ServoConfig {
     pub initial_targets: JointAnglesConfig,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RlConfig {
+    pub control_substeps: u32,
+    pub episode_timeout_s: f32,
+    pub torso_min_height: f32,
+    pub torso_max_tilt_rad: f32,
+    pub action_limit_deg: f32,
+    pub reward_forward_weight: f32,
+    pub reward_alive_bonus: f32,
+    pub reward_upright_weight: f32,
+    pub reward_height_weight: f32,
+    pub reward_contact_weight: f32,
+    pub reward_ball_forward_weight: f32,
+    pub penalty_torque_weight: f32,
+    pub penalty_action_delta_weight: f32,
+}
+
+impl Default for RlConfig {
+    fn default() -> Self {
+        Self {
+            control_substeps: 4,
+            episode_timeout_s: 20.0,
+            torso_min_height: 0.30,
+            torso_max_tilt_rad: 1.25,
+            action_limit_deg: 180.0,
+            reward_forward_weight: 2.0,
+            reward_alive_bonus: 0.02,
+            reward_upright_weight: 0.15,
+            reward_height_weight: 0.10,
+            reward_contact_weight: 0.03,
+            reward_ball_forward_weight: 3.0,
+            penalty_torque_weight: 0.0025,
+            penalty_action_delta_weight: 0.0015,
+        }
+    }
+}
+
 impl Default for SimulationConfig {
     fn default() -> Self {
         Self {
@@ -113,28 +152,28 @@ impl Default for SimulationConfig {
                 initial_pose: InitialPoseConfig {
                     torso: BodyPoseConfig {
                         x: 0.0,
-                        y: 1.08,
+                        y: 1.12,
                         angle: 0.0,
                     },
                     left_thigh: BodyPoseConfig {
-                        x: -0.08,
-                        y: 0.63,
-                        angle: 0.0,
+                        x: 0.086_619_23,
+                        y: 0.566_934,
+                        angle: 0.386_127_5,
                     },
                     left_shin: BodyPoseConfig {
-                        x: -0.17,
-                        y: 0.14,
-                        angle: 0.0,
+                        x: -0.003_380_775,
+                        y: 0.176_934_03,
+                        angle: -0.784_512_16,
                     },
                     right_thigh: BodyPoseConfig {
-                        x: 0.08,
-                        y: 0.63,
-                        angle: 0.0,
+                        x: -0.086_619_23,
+                        y: 0.566_934,
+                        angle: -0.386_127_5,
                     },
                     right_shin: BodyPoseConfig {
-                        x: 0.17,
-                        y: 0.14,
-                        angle: 0.0,
+                        x: 0.003_380_775,
+                        y: 0.176_934_03,
+                        angle: 0.784_512_16,
                     },
                 },
             },
@@ -145,18 +184,19 @@ impl Default for SimulationConfig {
                 max_torque: 10.0,
                 integral_limit: 10.0,
                 zero_offsets: JointAnglesConfig {
-                    right_hip: -0.15,
-                    right_knee: 1.15,
-                    left_hip: -0.15,
-                    left_knee: 1.15,
+                    right_hip: -0.386_127_5,
+                    right_knee: 1.170_639_6,
+                    left_hip: 0.386_127_5,
+                    left_knee: -1.170_639_6,
                 },
                 initial_targets: JointAnglesConfig {
-                    right_hip: -0.15,
-                    right_knee: 1.15,
-                    left_hip: -0.15,
-                    left_knee: 1.15,
+                    right_hip: -0.386_127_5,
+                    right_knee: 1.170_639_6,
+                    left_hip: 0.386_127_5,
+                    left_knee: -1.170_639_6,
                 },
             },
+            rl: RlConfig::default(),
         }
     }
 }

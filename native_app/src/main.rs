@@ -9,8 +9,9 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use serde::{Deserialize, Serialize};
 use sim_core::{
-    GaitCommand, JointCommand, MotionSequenceCommand, PoseCommand, SceneKind, ServoTargets,
-    Simulation, SimulationConfig, SimulationState,
+    GaitCommand, JointCommand, MotionSequenceCommand, PoseCommand, RlObservation, RlStepCommand,
+    RlStepResult, RlResetCommand, SceneKind, ServoTargets, Simulation, SimulationConfig,
+    SimulationState, WalkDirectionCommand,
 };
 use std::{
     fs,
@@ -24,7 +25,7 @@ use tracing::{error, info, warn};
 const WINDOW_WIDTH: i32 = 1280;
 const WINDOW_HEIGHT: i32 = 800;
 const PIXELS_PER_METER: f32 = 280.0;
-const ZOOM_MIN: f32 = 0.35;
+const ZOOM_MIN: f32 = 0.1;
 const ZOOM_MAX: f32 = 2.8;
 const ZOOM_SMOOTHING_HZ: f32 = 10.0;
 const ZOOM_WHEEL_FACTOR: f32 = 1.12;
@@ -32,6 +33,8 @@ const GRID_MINOR_STEP_WORLD: f32 = 0.5;
 const GRID_MAJOR_EVERY: i32 = 4;
 const GROUND_Y: f32 = 0.0;
 const PANEL_WIDTH: f32 = 440.0;
+const PANEL_MIN_WIDTH: f32 = 320.0;
+const PANEL_MARGIN: f32 = 12.0;
 const CONFIG_PATH: &str = "robot_config.toml";
 const MOTION_JSON_PATH: &str = "motion_sequence.json";
 
@@ -218,6 +221,10 @@ async fn run_server(sim: SharedSimulation, external_control: SharedExternalContr
         .route("/pose", post(set_pose))
         .route("/gait", post(set_gait))
         .route("/motion/sequence_deg", post(set_motion_sequence_deg))
+        .route("/rl/reset", post(rl_reset))
+        .route("/rl/observation", get(rl_observation))
+        .route("/rl/step", post(rl_step))
+        .route("/walk/direction", post(set_walk_direction))
         .with_state(AppState { sim, external_control });
 
     let listener = tokio::net::TcpListener::bind("127.0.0.1:8080").await?;
@@ -326,6 +333,43 @@ async fn set_gait(
     Ok(Json(OkResponse { ok: true }))
 }
 
+async fn rl_reset(
+    State(state): State<AppState>,
+    payload: Option<Json<RlResetCommand>>,
+) -> Result<Json<RlStepResult>, AppError> {
+    mark_external_control(&state.external_control);
+    let mut sim = state.sim.lock().map_err(|_| AppError::lock())?;
+    let command = payload.map(|value| value.0).unwrap_or_default();
+    Ok(Json(sim.rl_reset_with(command)))
+}
+
+async fn rl_observation(State(state): State<AppState>) -> Result<Json<RlObservation>, AppError> {
+    let sim = state.sim.lock().map_err(|_| AppError::lock())?;
+    Ok(Json(sim.rl_observation()))
+}
+
+async fn rl_step(
+    State(state): State<AppState>,
+    Json(command): Json<RlStepCommand>,
+) -> Result<Json<RlStepResult>, AppError> {
+    mark_external_control(&state.external_control);
+    let mut sim = state.sim.lock().map_err(|_| AppError::lock())?;
+    Ok(Json(sim.rl_step_deg(command)))
+}
+
+async fn set_walk_direction(
+    State(state): State<AppState>,
+    Json(command): Json<WalkDirectionCommand>,
+) -> Result<Json<OkResponse>, AppError> {
+    mark_external_control(&state.external_control);
+    let mut sim = state.sim.lock().map_err(|_| AppError::lock())?;
+    sim.set_target_direction(command.direction);
+    if let Some(enabled) = command.enabled {
+        sim.set_directional_walk_enabled(enabled);
+    }
+    Ok(Json(OkResponse { ok: true }))
+}
+
 async fn set_motion_sequence_deg(
     State(state): State<AppState>,
     Json(sequence): Json<Vec<[f32; 5]>>,
@@ -349,6 +393,23 @@ fn handle_keyboard(sim: &SharedSimulation) {
     if is_key_pressed(KeyCode::B) {
         if let Ok(mut sim) = sim.lock() {
             sim.reset_ball();
+        }
+    }
+    if is_key_pressed(KeyCode::Left) {
+        if let Ok(mut sim) = sim.lock() {
+            sim.set_target_direction(-1.0);
+            sim.set_directional_walk_enabled(true);
+        }
+    }
+    if is_key_pressed(KeyCode::Right) {
+        if let Ok(mut sim) = sim.lock() {
+            sim.set_target_direction(1.0);
+            sim.set_directional_walk_enabled(true);
+        }
+    }
+    if is_key_pressed(KeyCode::S) {
+        if let Ok(mut sim) = sim.lock() {
+            sim.set_directional_walk_enabled(false);
         }
     }
 }
@@ -460,10 +521,15 @@ fn draw_control_panel(
 
     let mut changed = false;
     let mut suspend_changed = false;
+    let available_width = (screen_width() - PANEL_MARGIN * 2.0).max(PANEL_MIN_WIDTH);
+    let panel_width = PANEL_WIDTH.min(available_width).max(PANEL_MIN_WIDTH.min(available_width));
+    let panel_height = (screen_height() - PANEL_MARGIN * 2.0).max(220.0);
+    let panel_x = (screen_width() - panel_width - PANEL_MARGIN).max(PANEL_MARGIN);
+    let panel_y = PANEL_MARGIN.min((screen_height() - panel_height).max(0.0));
     widgets::Window::new(
         hash!("servo-panel"),
-        vec2(screen_width() - PANEL_WIDTH - 12.0, 12.0),
-        vec2(PANEL_WIDTH, screen_height() - 24.0),
+        vec2(panel_x, panel_y),
+        vec2(panel_width, panel_height),
     )
     .label("Servo Control")
     .titlebar(true)
@@ -642,24 +708,61 @@ fn draw_control_panel(
         if ui.button(None, "Sync from robot") {
             controls.sync_from_state(&state);
         }
+        if ui.button(None, "Walk left") {
+            if let Ok(mut sim) = sim.lock() {
+                sim.set_target_direction(-1.0);
+                sim.set_directional_walk_enabled(true);
+            }
+        }
+        if ui.button(None, "Walk right") {
+            if let Ok(mut sim) = sim.lock() {
+                sim.set_target_direction(1.0);
+                sim.set_directional_walk_enabled(true);
+            }
+        }
+        if ui.button(None, "Stop walk") {
+            if let Ok(mut sim) = sim.lock() {
+                sim.set_directional_walk_enabled(false);
+            }
+        }
 
         ui.separator();
         ui.label(None, "Debug info");
+        ui.label(
+            None,
+            &format!(
+                "walk: {} | dir: {}",
+                state.walk_enabled,
+                if state.walk_direction >= 0.0 { "right" } else { "left" }
+            ),
+        );
         ui.label(None, "Motion editor");
-        slider_row(ui, "frame_ms", &mut controls.motion_frame_ms, 20.0..3000.0);
+        let frame_changed = slider_row(ui, "frame_ms", &mut controls.motion_frame_ms, 10.0..1000.0);
+        if frame_changed {
+            controls.motion_frame_ms = (controls.motion_frame_ms / 10.0).round() * 10.0;
+            controls.motion_frame_ms = controls.motion_frame_ms.clamp(10.0, 1000.0);
+        }
         ui.label(None, "Loop motion");
         widgets::Checkbox::new(hash!("motion_loop")).ui(ui, &mut controls.motion_loop);
-        slider_row(
+        let repeat_changed = slider_row(
             ui,
             "repeat_delay_ms",
             &mut controls.motion_repeat_delay_ms,
-            0.0..5000.0,
+            10.0..1000.0,
         );
+        if repeat_changed {
+            controls.motion_repeat_delay_ms = (controls.motion_repeat_delay_ms / 10.0).round() * 10.0;
+            controls.motion_repeat_delay_ms = controls.motion_repeat_delay_ms.clamp(10.0, 1000.0);
+        }
         ui.label(
             None,
             "frame format: [time_ms, servo1, servo2, servo3, servo4] in degrees",
         );
-        ui.editbox(hash!("motion_json_editbox"), vec2(PANEL_WIDTH - 36.0, 180.0), &mut controls.motion_json);
+        ui.editbox(
+            hash!("motion_json_editbox"),
+            vec2((panel_width - 36.0).max(180.0), 180.0),
+            &mut controls.motion_json,
+        );
         ui.separator();
         ui.label(None, &format!("L foot: {}", state.contacts.left_foot));
         ui.label(None, &format!("R foot: {}", state.contacts.right_foot));
@@ -1027,7 +1130,7 @@ fn draw_overlay(
     controls: &ControlPanelState,
     fonts: &AppFonts,
 ) {
-    draw_rectangle(24.0, 24.0, 430.0, 480.0, Color::new(1.0, 1.0, 1.0, 0.9));
+    draw_rectangle(24.0, 24.0, 430.0, 300.0, Color::new(1.0, 1.0, 1.0, 0.9));
     let title = match state.scene {
         SceneKind::Robot => "Robot mode",
         SceneKind::Ball => "Ball smoke-test",
@@ -1035,8 +1138,19 @@ fn draw_overlay(
     draw_text(title, 40.0, 58.0, 32.0, color_u8!(34, 40, 49, 255));
     draw_text(&format!("time: {:.2}s", state.time), 40.0, 92.0, 24.0, color_u8!(57, 62, 70, 255));
     draw_text(&format!("mode: {}", state.mode), 40.0, 120.0, 24.0, color_u8!(57, 62, 70, 255));
+    draw_text(
+        &format!(
+            "walk: {} {}",
+            if state.walk_enabled { "on" } else { "off" },
+            if state.walk_direction >= 0.0 { "->" } else { "<-" }
+        ),
+        40.0,
+        148.0,
+        24.0,
+        color_u8!(57, 62, 70, 255),
+    );
 
-    let mut y = 150.0;
+    let mut y = 182.0;
     for name in ["right_hip", "right_knee", "left_hip", "left_knee"] {
         if let Some(joint) = state.joints.get(name) {
             draw_text(
@@ -1062,31 +1176,6 @@ fn draw_overlay(
         color_u8!(50, 61, 79, 255),
     );
     y += 40.0;
-    for name in ["torso", "left_thigh", "left_shin", "right_thigh", "right_shin"] {
-        if let Some(mass) = state.link_masses.get(name) {
-            draw_text(
-                &format!("{name} mass: {:.2} kg", mass),
-                40.0,
-                y,
-                22.0,
-                color_u8!(50, 61, 79, 255),
-            );
-            y += 24.0;
-        }
-    }
-    y += 8.0;
-    for name in ["torso", "left_thigh", "left_shin", "right_thigh", "right_shin"] {
-        if let Some(length) = state.link_lengths.get(name) {
-            draw_text(
-                &format!("{name} length: {:.2} m", length),
-                40.0,
-                y,
-                22.0,
-                color_u8!(50, 61, 79, 255),
-            );
-            y += 24.0;
-        }
-    }
     draw_text(
         &format!("zoom: {:.2}x", view.zoom),
         40.0,
@@ -1096,9 +1185,9 @@ fn draw_overlay(
     );
     draw_text(
         if view.follow_robot {
-            "wheel zoom, drag pan, F/Space center robot, R reset"
+            "wheel zoom, drag pan, Left/Right walk, S stop, F/Space center robot, R reset"
         } else {
-            "wheel zoom, drag pan, F/Space recenter robot, R reset"
+            "wheel zoom, drag pan, Left/Right walk, S stop, F/Space recenter robot, R reset"
         },
         40.0,
         y + 28.0,
