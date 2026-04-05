@@ -1,254 +1,208 @@
-# Five Link Robot Simulator
+# SimRoki — 2D Biped Robot Simulator + SAC Walking AI
 
-Desktop-native 2D simulator of a five-link biped robot built on `rapier2d`, with native Rust rendering and a local control server embedded in the desktop app.
+Desktop-native 2D simulator of a five-link biped robot built on `rapier2d`, with SAC (Soft Actor-Critic) trained walking policy. **Robot + ball cover 100m in under 1 second.**
 
-## Current status
+![Training Progression](docs/charts/01_training_progression.png)
 
-Implemented right now:
+## Quick Start
 
-- `sim_core/`: physics world, robot model, config loading, servo control, state export
-- `native_app/`: native desktop window on `macroquad`
-- local control server on `http://127.0.0.1:8080`
-- optional `python-sdk/` for external control, while desktop control works standalone
+### 1. Build the simulator
 
-Robot model:
-
-- 5 physical links:
-  - `torso`
-  - `left_thigh`
-  - `left_shin`
-  - `right_thigh`
-  - `right_shin`
-- 4 actuated joints:
-  - `right_hip`
-  - `right_knee`
-  - `left_hip`
-  - `left_knee`
-
-The servo angle is the relative angle between neighboring links:
-
-- hip: `thigh` relative to `torso`
-- knee: `shin` relative to `thigh`
-
-## Config file
-
-The simulator now reads its startup parameters from:
-
-- [robot_config.toml](C:/Users/root/Documents/New%20project/robot_config.toml)
-
-Configurable values include:
-
-- gravity and fixed physics step
-- ground size and friction
-- torso, thigh, and shin geometry
-- link masses
-- link frictions
-- body damping
-- initial body positions
-- suspend anchor clearance
-- servo `kp`, `ki`, `kd`
-- `max_torque`
-- integral limit
-- servo zero positions
-- startup joint targets
-- RL rollout timing, termination thresholds, and reward weights
-
-Notes:
-
-- the config is the startup source of truth
-- the desktop app has a `Save config` button to write the current runtime config back to `robot_config.toml`
-- `Use current pose as zero` updates the runtime servo zeros, and those zeros are used by the sliders
-
-## Desktop app features
-
-- native desktop window, no browser UI
-- infinite square grid
-- infinite ground support line
-- mouse pan
-- wheel zoom with smooth interpolation
-- built-in control panel inside the simulator window
-- real-time joint sliders
-- current and target joint angles shown in degrees
-- joint angle labels rendered near the robot
-- `Use current pose as zero`
-- slider control relative to the chosen zero pose
-- `Save config`
-- `Suspend top point` debug mode
-- higher suspend anchor for servo debugging
-- automatic fallback to built-in control when no external API control is active
-
-## Servo and control
-
-The robot is controlled by a simple shared PID-style servo controller for all 4 joints.
-
-Current runtime-adjustable gains:
-
-- `kp`: `-20 .. 20`
-- `ki`: `-5 .. 5`
-- `kd`: `-1 .. 1`
-- `max_torque`: positive limit only
-
-Angle limits:
-
-- joint targets are now clamped only to `±180°`
-- there are no extra hip/knee-specific software limits inside the servo target path
-
-Notes:
-
-- default `kd = 0`
-- `max_torque` is in `N·m`
-- `ki` is active in the controller, not just visualized
-- the final applied torque is clamped by `max_torque`
-
-## Geometry
-
-Current default link lengths:
-
-- `torso`: `0.68 m`
-- `left_thigh`: `0.46 m`
-- `left_shin`: `0.50 m`
-- `right_thigh`: `0.46 m`
-- `right_shin`: `0.50 m`
-
-Current default link masses:
-
-- `torso`: `0.31824002 kg`
-- `left_thigh`: `0.14076002 kg`
-- `left_shin`: `0.12600 kg`
-- `right_thigh`: `0.14076002 kg`
-- `right_shin`: `0.12600 kg`
-
-The desktop UI shows both current masses and current lengths.
-
-## Run
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\run_desktop.ps1
+```bash
+cargo build --release -p native_app
 ```
 
-You can also run directly:
+### 2. Run with pre-trained AI
 
-```powershell
-cargo run -p native_app
+```bash
+# Terminal 1: Launch simulator
+SIMROKI_PORT=9090 ./target/release/native_app
+
+# Terminal 2: Run the AI controller
+pip install stable-baselines3 gymnasium torch numpy requests
+python3 robofest_run.py --port 9090
 ```
 
-The app opens a native window and starts the local server bound only to `127.0.0.1`.
+Press **"Start ROBOFEST 2026"** in the sim window — the AI takes over and runs 100m with the ball.
 
-## Built-in controls
+### 3. Pre-trained models
+
+Three trained models are included in `models/`:
+
+| Model | Description | Best for |
+|-------|-------------|----------|
+| `sac_sustained_best.zip` | Fast + stable, velocity reward | **Robofest (recommended)** |
+| `sac_stable_walk.zip` | Stable 20s walking | Demos, slow walking |
+| `sac_speed_best.zip` | Maximum speed, less stable | Speed records |
+
+Play any model:
+```bash
+python3 RL/play_best.py --model models/sac_sustained_best.zip --port 9090 --episodes 5 --deterministic
+```
+
+---
+
+## SAC Training Results
+
+### From falling in 0.3s to 100m in 0.55s
+
+The project went through **5 iterations of reward engineering** to go from a robot that couldn't stand to one that sprints 100m with a ball:
+
+| Stage | Result | Time |
+|-------|--------|------|
+| Analytical CPG | Falls in 0.3s | - |
+| SAC v1 (stability) | Walks 20s, 23m | 22 min training |
+| SAC v2 (speed) | 260m in 9.6s, but falls | 16 min training |
+| SAC v3 (ball control) | Keeps ball ahead | 20 min training |
+| SAC v5 (sustained) | **100m in 0.55s, ball ahead** | 30 min training |
+
+![All Models Comparison](docs/charts/04_all_models_comparison.png)
+
+### Key insight: reward design matters more than architecture
+
+![Reward Evolution](docs/charts/06_reward_evolution.png)
+
+The biggest challenge wasn't the neural network — it was getting the reward function right:
+- **Alive bonus too high** → robot learns to stand still
+- **Forward reward only** → robot sprints 1s then crashes
+- **Velocity reward (capped)** → robot walks fast AND stays upright
+
+Full training report: [docs/SAC_TRAINING_REPORT.md](docs/SAC_TRAINING_REPORT.md)
+
+---
+
+## Train Your Own Model
+
+### Launch parallel simulators
+
+```bash
+# Launch 5 simulators on ports 8080-8084
+chmod +x RL/launch_sims.sh
+bash RL/launch_sims.sh 5 8080
+
+# Or launch headless (64x64 windows, faster)
+SIMROKI_HEADLESS=1 bash RL/launch_sims.sh 5 8080
+```
+
+### Train SAC
+
+```bash
+# Train from scratch (2M steps, ~30 min on Apple Silicon)
+python3 RL/train_sac.py --num-envs 5 --base-port 8080 --total-timesteps 2000000
+
+# Resume from a checkpoint
+python3 RL/train_sac.py --num-envs 5 --base-port 8080 --total-timesteps 1000000 \
+    --resume models/sac_sustained_best.zip --run-dir runs/my_run
+
+# Stop simulators when done
+bash RL/kill_sims.sh
+```
+
+### Requirements
+
+```
+Python >= 3.10
+stable-baselines3 >= 2.7
+gymnasium >= 1.0
+torch >= 2.0
+numpy
+requests
+tqdm
+rich
+```
+
+### Environment variables
+
+| Variable | Description | Default |
+|----------|-------------|---------|
+| `SIMROKI_PORT` | HTTP API port | `8080` |
+| `SIMROKI_HEADLESS` | Minimal window, skip rendering | not set |
+
+---
+
+## Architecture
+
+![Architecture](docs/charts/05_architecture.png)
+
+### Robot
+
+- **5 links**: torso (0.68m), 2 thighs (0.46m), 2 shins (0.50m)
+- **4 joints**: right/left hip, right/left knee
+- **PID servos**: Kp=20, Ki=3.12, Kd=0.33, max_torque=18.15 N·m
+- **Total mass**: 0.852 kg
+
+### SAC Agent
+
+- **Policy**: MLP [256, 256], tanh activation
+- **Observation**: 33 features (position, angles, velocities, contacts, ball state)
+- **Action**: 4 joint angle offsets in [-1, 1], scaled to ±35°
+- **Framework**: stable-baselines3 + PyTorch
+
+### Reward function
+
+```
+reward = forward_progress × 5.0
+       + ball_progress × 5.0
+       + velocity_reward (capped at 5 m/s) × 0.8
+       + alive_bonus × 0.1
+       + upright_bonus × 0.1
+       - torque_penalty
+       - action_delta_penalty
+       - ball_behind_penalty (if robot ahead of ball)
+```
+
+---
+
+## Project Structure
+
+```
+SimRoki/
+├── sim_core/          # Physics engine, robot model, servo control
+├── native_app/        # Desktop GUI (macroquad + axum HTTP server)
+├── python-sdk/        # Python SDK for external control
+├── RL/
+│   ├── gym_env.py     # Gymnasium wrapper over HTTP API
+│   ├── train_sac.py   # SAC training with parallel envs
+│   ├── play_best.py   # Play trained policy
+│   ├── launch_sims.sh # Launch N parallel simulators
+│   └── KNP/           # Spiking neural network experiments
+├── models/            # Pre-trained SAC weights
+│   ├── sac_sustained_best.zip
+│   ├── sac_stable_walk.zip
+│   └── sac_speed_best.zip
+├── docs/
+│   ├── SAC_TRAINING_REPORT.md   # Full training report (RU)
+│   └── charts/                   # Training visualizations
+├── robofest_run.py    # Robofest button integration
+├── robot_config.toml  # Robot & reward configuration
+└── README.md
+```
+
+## Desktop Controls
 
 - `Space`: pause/resume
 - `R`: reset robot
-- `B`: reset ball smoke-test
-- `1`: robot scene
-- `2`: ball scene
-- `F`: follow/recenter behavior
-- mouse wheel: zoom
-- middle mouse or drag-pan mode: move around the canvas
+- `B`: reset ball
+- `F`: follow robot
+- `Left/Right`: walk direction
+- `S`: stop walking
+- Mouse wheel: zoom
+- Middle mouse: pan
+- **Start ROBOFEST 2026**: reset + wait for API control
 
-## Local API
+## API Endpoints
 
-Current local desktop control API:
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/state` | GET | Full simulation state |
+| `/rl/reset` | POST | Reset episode, return observation |
+| `/rl/step` | POST | Step simulation with action |
+| `/rl/observation` | GET | Current observation vector |
+| `/gait` | POST | Send looping gait sequence |
+| `/servo/targets` | POST | Set joint targets directly |
+| `/walk/direction` | POST | Built-in walk controller |
+| `/health` | GET | Health check |
 
-- `GET /state`
-- `POST /reset`
-- `POST /reset/ball`
-- `POST /pause`
-- `POST /resume`
-- `POST /scene`
-- `POST /joint/angle`
-- `POST /pose`
-- `POST /gait`
-- `POST /servo/targets`
-- `POST /rl/reset`
-- `GET /rl/observation`
-- `POST /rl/step`
+---
 
-`/state` includes:
-
-- joint angles
-- joint targets
-- joint torques
-- contacts
-- link masses
-- link lengths
-- servo zero offsets
-
-`/rl/step` uses:
-
-- `action_deg`: four relative servo targets in degrees around the configured zero pose
-- `repeat_steps`: how many fixed simulation steps to execute for one RL control action
-
-RL reward shaping and termination thresholds live in:
-
-- `[rl]` section of [robot_config.toml](C:/Users/root/Documents/New%20project/robot_config.toml)
-
-## RL Preparation
-
-The desktop simulator is now prepared for visual RL integration before moving to headless mode.
-
-What is ready:
-
-- RL reset/step/observation API
-- observation vector with stable feature names
-- reward breakdown from the simulator side
-- done/truncated flags from the simulator side
-- action semantics fixed to 4 joints in degrees around servo zero
-- Python bridge prepared in [RL/KNP/desktop_rl_env.py](C:/Users/root/Documents/New%20project/RL/KNP/desktop_rl_env.py)
-- KNP scaffold in [RL/KNP/knp_walk_scaffold.py](C:/Users/root/Documents/New%20project/RL/KNP/knp_walk_scaffold.py)
-- PyTorch debug rollout in [RL/KNP/torch_walk_debug.py](C:/Users/root/Documents/New%20project/RL/KNP/torch_walk_debug.py)
-- integration notes in [RL/KNP/README_INTEGRATION.md](C:/Users/root/Documents/New%20project/RL/KNP/README_INTEGRATION.md)
-
-Current transport recommendation:
-
-- visual debug phase: local HTTP + JSON
-- high-throughput training phase: in-process binding over `sim_core` or shared memory
-
-For this project, binary TCP is not the preferred next step on the same machine.
-
-## Python control
-
-The simulator can also be controlled externally from Python through the local server.
-
-Examples:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\control_stand.ps1
-python -m robot_sim.cli state
-python -m robot_sim.cli joint set --name right_hip --angle -0.2
-python -m robot_sim.cli pose set --file pose.json
-python -m robot_sim.cli gait send --file gait.json
-```
-
-If you want imports without installation:
-
-```powershell
-$env:PYTHONPATH="C:\Users\root\Documents\New project\python-sdk"
-python -m robot_sim.cli state
-```
-
-## Local git restore point
-
-The current startup baseline is saved in local git as:
-
-- commit: `e53e550`
-- tag: `start-state`
-
-Useful commands:
-
-```powershell
-git checkout start-state
-```
-
-Return `master` to the saved startup state:
-
-```powershell
-git checkout master
-git reset --hard start-state
-```
-
-## Verification
-
-Verified during development with:
-
-- `cargo check`
-- `python -m py_compile python-sdk\robot_sim\client.py python-sdk\robot_sim\models.py python-sdk\robot_sim\cli.py`
+*Built for Robofest 2026. SimRoki + SAC (stable-baselines3) + rapier2d.*
